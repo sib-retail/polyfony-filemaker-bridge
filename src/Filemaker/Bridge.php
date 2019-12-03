@@ -2,6 +2,13 @@
 
 namespace Filemaker;
 
+use Polyfony\Profiler as Profiler;
+use Polyfony\Logger as Logger;
+use Polyfony\Keys as Keys;
+use Polyfony\Config as Config;
+use Polyfony\Exception as Exception;
+
+use \Curl\Curl;
 /*
  * Config.ini
  *
@@ -11,96 +18,113 @@ namespace Filemaker;
  * timeout = "10"
  * retry = "3"
  * 
- * 
- * 
  */
 
 class Bridge {
 
 
-	public static function execute($mixed) {
+	public static function execute($mixed) :array {
 	
 		// start profiling
-		\Polyfony\Profiler::setMarker('remote_start');
+		Profiler::setMarker('remote_start');
 		
-		// prepate a new http request
-		$request = new \Polyfony\HttpRequest( 
-			// to the proper destination
-			\Polyfony\Config::get('bridge', 'url'),
-			'POST',
-			\Polyfony\Config::get('bridge', 'timeout'),
-			\Polyfony\Config::get('bridge', 'retry') 
-		);
+		// create the curl request
+		$curl_request = new Curl;
+
+		// preconfigure the curl request
+		$curl_request->setTimeout(Config::get('bridge', 'timeout'));
+		$curl_request->setRetry(Config::get('bridge', 'retry'));
 	
 		// serialize the query string or object
 		$query = base64_encode(gzcompress(serialize($mixed), 9));
 
-		// generate a key for this remote request
-		$key = \Polyfony\Keys::generate(array(
-			'dsn'		=> \Polyfony\Config::get('bridge', 'dsn'),
-			'query'		=> $query
-		));
-	
-		// pass the request
-		$request->data('query', $query);
-		// pass the dns
-		$request->data('dsn', \Polyfony\Config::get('bridge', 'dsn'));
-		// pass the key securing the whole
-		$request->data('key', $key);
-		
-		// try to execute
-		try {
-			
-			// send the actual request
-			$success = $request->send();
-			
-			// if it succeeded
-			if($success) {
-				
-				// check for matching keys
-				$body = $request->getBody();
+		// send the request to the bridge
+		$curl_request->post(
+			Config::get('bridge', 'url'),
+			[
+				'dsn'	=>Config::get('bridge', 'dsn'),
+				'query'	=>$query,
+				'key'	=>Keys::generate([
+					'dsn'	=> Config::get('bridge', 'dsn'),
+					'query'	=> $query
+				])
+			]
+		);
 
-				// check if the body is an array
-				if(is_array($body)) {
-						
-					// check if the key matches
-					if(\Polyfony\Keys::compare(
-						// the given key
-						$body['key'],
-						// what data is should reflect
-						array(
-							'dsn'		=> $body['dsn'],
-							'result'	=> $body['result']
-						)
-					)) {
-						// we can trust the result
-						return unserialize( gzuncompress( base64_decode( $body['result'] ) ) );
-					}
-					else { Throw new \Polyfony\Exception('Curl returned data that we cannot trust', 500); }
-				}
-				else { Throw new \Polyfony\Exception('Curl returned data in wrong format', 500); }	
-			}
-			// curl failed 
-			else {
-				// fatal exception
-				Throw new \Polyfony\Exception(
-					'Curl failed to execute the remote request'. !$request->getBody() ?: ' : ' . $request->getBody(true), 
-					500
-				);
-			}
-			
-		}
-		// catch any exception
-		catch (\Polyfony\Exception $e) {
-		
-			// throw a fatal exception 
-			Throw $e;
-			
-		}
+		// stop profiling (we don't include decoding of the response)
+		Profiler::setMarker('remote_end');
+
+		// handle the response
+		return self::parseResponse($curl_request);
 	
-		// stop profiling
-		\Polyfony\Profiler::setMarker('remote_end');
 		
+		
+	}
+
+	public static function parseResponse(
+		Curl $curl_request
+	) :array {
+
+		// if the request encountered an error on Curl's side
+		if($curl_request->error) {
+			// log details
+			Logger::warning('Details of curl error', [
+				$curl_request->getErrorMessage(),
+				$curl_request->getErrorCode(),
+				$curl_request->getCurlErrorMessage(),
+				$curl_request->getCurlErrorCode(),
+			]);
+			// stop execution here
+			Throw new Exception(
+				$curl_request->getHttpErrorMessage(), 	// or ->getErrorMessage() or ->getCurlErrorMessage()
+				$curl_request->getHttpStatusCode() 		// or ->getErrorCode() or ->getCurlErrorCode()
+			);
+		}
+		// if the type of the response is not an array
+		elseif(!is_object($curl_request->response)) {
+			// log details
+			Logger::warning('Curl returned', $curl_request->response);
+			// stop execution here
+			Throw new Exception(
+				'We expected an array but curl got something else (Please look at the logs)',
+				500
+			);
+		}
+		// if the keys don't match
+		elseif(!Keys::compare(
+			// we compare the key we received
+			$curl_request->response->key,
+			// with the key generated on the fly from the received query result
+			[
+				'dsn'		=> $curl_request->response->dsn,
+				'result'	=> $curl_request->response->result
+			]
+		)) {
+			// log details
+			Logger::warning('Here are the differing keys', [
+				'expected'=>Keys::generate([
+					'dsn'		=> $curl_request->response->dsn,
+					'result'	=> $curl_request->response->result
+				]),
+				'received'=>$curl_request->response->key
+			]);
+			// stop execution here
+			Throw new Exception(
+				'Curl returned data that we cannot trust (Please look at the logs)',
+				500
+			);
+		}
+		// everything is right, curl is happy, the result is an array and keys are valid (data integrity checked)
+		else {
+			return unserialize( 
+				gzuncompress( 
+					base64_decode( 
+						$curl_request->response->result 
+					)
+				)
+			);
+		}
+
 	}
 	
 }

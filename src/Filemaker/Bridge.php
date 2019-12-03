@@ -116,13 +116,37 @@ class Bridge {
 		}
 		// everything is right, curl is happy, the result is an array and keys are valid (data integrity checked)
 		else {
-			return unserialize( 
+			// decode the response
+			$response = unserialize( 
 				gzuncompress( 
 					base64_decode( 
 						$curl_request->response->result 
 					)
 				)
 			);
+			// if the response is not an array
+			if(!is_array($response)) {
+				// log details
+				Logger::warning('ODBC/Filemaker returned', $response);
+				// stop execution here
+				Throw new Exception(
+					'ODBC/Filemaker did not return an array',
+					500
+				);
+			}
+			// if the response contains an error
+			elseif(array_key_exists('error',$response)) {
+				// log details
+				Logger::warning('ODBC/Filemaker returned an error', $response['error']);
+				// stop execution here
+				Throw new Exception(
+					'The bridge is working, but filemaker is not. ODBC returned '.$response['error'],
+					500
+				);
+			}
+			else {
+				return $response;
+			}
 		}
 
 	}

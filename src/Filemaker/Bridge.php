@@ -26,7 +26,7 @@ class Bridge {
 	public static function execute($mixed) :array {
 	
 		// start profiling
-		Profiler::setMarker('remote_start');
+		$id_marker = Profiler::setMarker('BridgeQuery-'.substr(sha1(microtime()),0,6));
 		
 		// create the curl request
 		$curl_request = new Curl;
@@ -52,7 +52,7 @@ class Bridge {
 		);
 
 		// stop profiling (we don't include decoding of the response)
-		Profiler::setMarker('remote_end');
+		Profiler::releaseMarker($id_marker);
 
 		// handle the response
 		return self::parseResponse($curl_request);
